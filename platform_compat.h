@@ -53,7 +53,22 @@ static inline int ee_link(const char *oldpath, const char *newpath)
 	if (CreateHardLinkA(newpath, oldpath, NULL)) {
 		return 0;
 	}
-	errno = EACCES; /* Approximate errno value */
+	/* Map Windows error to appropriate errno value */
+	switch (GetLastError()) {
+		case ERROR_FILE_NOT_FOUND:
+		case ERROR_PATH_NOT_FOUND:
+			errno = ENOENT;
+			break;
+		case ERROR_ACCESS_DENIED:
+			errno = EACCES;
+			break;
+		case ERROR_ALREADY_EXISTS:
+			errno = EEXIST;
+			break;
+		default:
+			errno = EIO;
+			break;
+	}
 	return -1;
 }
 

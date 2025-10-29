@@ -98,7 +98,7 @@ nl_catd catalog;
 #define catgetlocal(a, b) (b)
 #endif /* NO_CATGETS */
 
-/* Windows does not define SIGCHLD. On systems that don't have SIGCHLD, we try SIGCLD. */
+/* Some systems do not define SIGCHLD. On systems that don't have SIGCHLD, we try SIGCLD. */
 #if !defined(SIGCHLD) && defined(SIGCLD)
 #define SIGCHLD SIGCLD
 #endif
