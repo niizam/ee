@@ -1,3 +1,29 @@
+### Linux (Debian/Ubuntu) quick start:
+```bash
+sudo apt install build-essential cmake libncurses-dev libcurl4-openssl-dev
+cmake -S . -B build
+cmake --build build
+```
+### Windows (MSYS2 MinGW64 shell) quick start:
+```bash
+pacman -Syu
+pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-pdcurses mingw-w64-x86_64-curl
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build
+```
+OpenAI chat completions and code completions are available from inside the
+editor. Press `Ctrl+q` to open the assistant menu, where you can set the API
+key, base URL, model name, and system prompt, or trigger the assistant
+actions. Use the `chat` command (or pick “Ask OpenAI”) for conversational
+help, and use the `complete` command or the `Ctrl+]` shortcut to request an
+inline code completion tailored to the current cursor position.
+
+On Windows the bundled shell escape still works for `!cmd`, but piping
+editor contents to or from external commands is currently disabled because
+native Windows lacks `fork()` semantics.  When building on POSIX-like
+platforms (including MSYS2's POSIX environment) that functionality
+remains available.
+```
 Copyright (c) 2009, Hugh Mahon
 All rights reserved.
 
@@ -92,36 +118,7 @@ Complaints that ee isn't working quite right often end up being something
 else (like the terminal emulator being used).  
 
 Both ee and new_curse were developed using K&R C (also known as "classic 
-C"), but it can also be compiled with ANSI C.  A modern CMake-based build 
-is provided and is the recommended way to compile the editor on both Linux 
-and Windows.  The legacy makefiles remain in the tree for historical 
-purposes, but CMake requires far less manual configuration.
-
-Linux (Debian/Ubuntu) quick start:
-
-    sudo apt install build-essential cmake libncurses-dev libcurl4-openssl-dev
-    cmake -S . -B build
-    cmake --build build
-
-Windows (MSYS2 MinGW64 shell) quick start:
-
-    pacman -Syu
-    pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-pdcurses mingw-w64-x86_64-curl
-    cmake -S . -B build -G "MinGW Makefiles"
-    cmake --build build
-
-OpenAI chat completions and code completions are available from inside the
-editor. Press `Ctrl+q` to open the assistant menu, where you can set the API
-key, base URL, model name, and system prompt, or trigger the assistant
-actions. Use the `chat` command (or pick “Ask OpenAI”) for conversational
-help, and use the `complete` command or the `Ctrl+]` shortcut to request an
-inline code completion tailored to the current cursor position.
-
-On Windows the bundled shell escape still works for `!cmd`, but piping
-editor contents to or from external commands is currently disabled because
-native Windows lacks `fork()` semantics.  When building on POSIX-like
-platforms (including MSYS2's POSIX environment) that functionality
-remains available.
+C"), but it can also be compiled with ANSI C. 
 
 ee is the result of several conflicting design goals.  While I know that it 
 solves the problems of some users, I also have no doubt that some will decry 
@@ -141,3 +138,4 @@ Hugh Mahon              |___|
 hugh4242@yahoo.com      |   |     
                             |\  /|
                             | \/ |
+```
