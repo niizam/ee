@@ -98,8 +98,14 @@ nl_catd catalog;
 #define catgetlocal(a, b) (b)
 #endif /* NO_CATGETS */
 
+/* Some systems do not define SIGCHLD. On systems that don't have SIGCHLD, we try SIGCLD. */
 #if !defined(SIGCHLD) && defined(SIGCLD)
 #define SIGCHLD SIGCLD
+#endif
+
+/* If neither SIGCHLD nor SIGCLD is defined, define a flag to skip SIGCHLD usage */
+#if !defined(SIGCHLD)
+#define EE_NO_SIGCHLD
 #endif
 
 #define TAB 9
@@ -637,7 +643,9 @@ char *argv[];
 	for (counter = 1; counter < 24; counter++)
 		signal(counter, SIG_IGN);
 
+#ifndef EE_NO_SIGCHLD
 	signal(SIGCHLD, SIG_DFL);
+#endif
 	signal(SIGSEGV, SIG_DFL);
 	signal(SIGINT, edit_abort);
 	d_char = malloc(3);	/* provide a buffer for multi-byte chars */
@@ -3320,7 +3328,9 @@ char *string;		/* string containing user command		*/
 /*
  |  prepare editor to read from the pipe
  */
+#ifndef EE_NO_SIGCHLD
 			signal(SIGCHLD, SIG_IGN);
+#endif
 			line_holder = curr_line;
 			tmp_vert = scr_vert;
 			close(pipe_in[1]);
@@ -3334,7 +3344,9 @@ char *string;		/* string containing user command		*/
 			from_top();
 			point = curr_line->line;
 			out_pipe = FALSE;
+#ifndef EE_NO_SIGCHLD
 			signal(SIGCHLD, SIG_DFL);
+#endif
 /*
  |  since flag "in_pipe" is still TRUE, the path which waits for the child 
  |  process to die will be avoided.
@@ -5840,7 +5852,7 @@ dump_ee_conf()
 	{
 		sprintf(buffer, "%s.old", file_name);
 		unlink(buffer);
-		link(file_name, buffer);
+		ee_link(file_name, buffer);
 		unlink(file_name);
 		old_init_file = fopen(buffer, "r");
 	}
