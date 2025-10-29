@@ -54,8 +54,12 @@
  |
  */
 
+#ifdef __FreeBSD__
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
+#endif
+
+#include "platform_compat.h"
 
 char *ee_copyright_message = 
 "Copyright (c) 1986, 1990, 1991, 1992, 1993, 1994, 1995, 1996, 2009 Hugh Mahon ";
@@ -72,6 +76,7 @@ char *version = "@(#) ee, version "  EE_VERSION  " $Revision: 1.104 $";
 #include <curses.h>
 #endif
 
+#include <stdio.h>
 #include <ctype.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -79,23 +84,9 @@ char *version = "@(#) ee, version "  EE_VERSION  " $Revision: 1.104 $";
 #include <sys/stat.h>
 #include <errno.h>
 #include <string.h>
-#include <pwd.h>
 #include <locale.h>
-
-#ifdef HAS_SYS_WAIT
-#include <sys/wait.h>
-#endif
-
-#ifdef HAS_STDLIB
-#include <stdlib.h>
-#endif
-
-#ifdef HAS_STDARG
-#include <stdarg.h>
-#endif
-
-#ifdef HAS_UNISTD
-#include <unistd.h>
+#if !defined(EE_HAVE_NO_PWD)
+#include <pwd.h>
 #endif
 
 #ifndef NO_CATGETS
@@ -106,7 +97,7 @@ nl_catd catalog;
 #define catgetlocal(a, b) (b)
 #endif /* NO_CATGETS */
 
-#ifndef SIGCHLD
+#if !defined(SIGCHLD) && defined(SIGCLD)
 #define SIGCHLD SIGCLD
 #endif
 
@@ -158,6 +149,10 @@ int fildes;			/* file descriptor			*/
 int case_sen;			/* case sensitive search flag		*/
 int last_line;			/* last line for text display		*/
 int last_col;			/* last column for text display		*/
+
+#if defined(_WIN32)
+static const char win_shell_pipe_msg[] = "shell piping is not supported on Windows builds";
+#endif
 int horiz_offset = 0;		/* offset from left edge of text	*/
 int clear_com_win;		/* flag to indicate com_win needs clearing */
 int text_changes = FALSE;	/* indicate changes have been made to text */
@@ -1812,6 +1807,13 @@ char *cmd_str1;
 	}
 	else if ((*cmd_str == '<') && (!in_pipe))
 	{
+#ifdef _WIN32
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, "%s", win_shell_pipe_msg);
+		wrefresh(com_win);
+		return;
+#else
 		in_pipe = TRUE;
 		shell_fork = FALSE;
 		cmd_str++;
@@ -1820,15 +1822,24 @@ char *cmd_str1;
 		command(cmd_str);
 		in_pipe = FALSE;
 		shell_fork = TRUE;
+#endif
 	}
 	else if ((*cmd_str == '>') && (!out_pipe))
 	{
+#ifdef _WIN32
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, "%s", win_shell_pipe_msg);
+		wrefresh(com_win);
+		return;
+#else
 		out_pipe = TRUE;
 		cmd_str++;
 		if ((*cmd_str == ' ') || (*cmd_str == '\t'))
 			cmd_str = next_word(cmd_str);
 		command(cmd_str);
 		out_pipe = FALSE;
+#endif
 	}
 	else
 	{
@@ -3066,6 +3077,71 @@ from_top()
 	absolute_lin = x;
 }
 
+#if defined(_WIN32)
+void 
+sh_command(string)	/* execute shell command			*/
+char *string;		/* string containing user command		*/
+{
+	const char *shell_path;
+	int status;
+
+	if (restrict_mode())
+		return;
+
+	if ((string == NULL) || (*string == '\0'))
+		return;
+
+	if (in_pipe || out_pipe)
+	{
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, "%s", win_shell_pipe_msg);
+		wrefresh(com_win);
+		return;
+	}
+
+	if (!(shell_path = getenv("SHELL")))
+	{
+		shell_path = getenv("COMSPEC");
+		if (shell_path == NULL)
+			shell_path = "cmd.exe";
+	}
+
+	if (!in_pipe)
+	{
+		keypad(com_win, FALSE);
+		keypad(text_win, FALSE);
+		echo();
+		nl();
+		noraw();
+		resetty();
+#ifndef NCURSE
+		endwin();
+#endif
+	}
+
+	status = system(string);
+	if (status == -1)
+		fprintf(stderr, exec_err_msg, shell_path);
+
+	if (!in_pipe)
+	{
+		fputs(continue_msg, stdout);
+		fflush(stdout);
+		while ((in = getchar()) != '\n')
+			;
+		fixterm();
+		noecho();
+		nonl();
+		raw();
+		keypad(text_win, TRUE);
+		keypad(com_win, TRUE);
+		if (info_window)
+			clearok(info_win, TRUE);
+		redraw();
+	}
+}
+#else
 void 
 sh_command(string)	/* execute shell command			*/
 char *string;		/* string containing user command		*/
@@ -3262,6 +3338,8 @@ char *string;		/* string containing user command		*/
 
 	redraw();
 }
+
+#endif /* _WIN32 */
 
 void 
 set_up_term()		/* set up the terminal for operating with ae	*/
@@ -4889,10 +4967,52 @@ char *name;
 	int offset;
 	int index;
 	int counter;
+#if !defined(EE_HAVE_NO_PWD)
 	struct passwd *user;
+#endif
+#if defined(_WIN32)
+	const char *home;
+#endif
 
 	if (name[0] == '~') 
 	{
+#if defined(EE_HAVE_NO_PWD)
+		slash = name + 1;
+		if ((*slash == '\0') || (*slash == '/') || (*slash == '\\'))
+		{
+			const char *path_sep = ((*slash == '\\') ? "\\" : "/");
+			home = getenv("HOME");
+			if ((home == NULL) || (*home == '\0'))
+				home = getenv("USERPROFILE");
+			if ((home == NULL) || (*home == '\0'))
+			{
+				const char *drive = getenv("HOMEDRIVE");
+				const char *path = getenv("HOMEPATH");
+				if ((drive != NULL) && (*drive != '\0') &&
+				    (path != NULL) && (*path != '\0'))
+				{
+					static char win_home[PATH_MAX];
+					snprintf(win_home, sizeof(win_home), "%s%s", drive, path);
+					home = win_home;
+				}
+			}
+			if ((home == NULL) || (*home == '\0'))
+				return(name);
+
+			buffer = malloc(strlen(home) + strlen(slash) + 2);
+			if (buffer == NULL)
+				return(name);
+			strcpy(buffer, home);
+			if ((*slash != '\0') && (buffer[strlen(buffer) - 1] != '/') &&
+			    (buffer[strlen(buffer) - 1] != '\\'))
+				strcat(buffer, path_sep);
+			strcat(buffer, slash);
+		}
+		else
+		{
+			return(name);	/* "~user" style expansion unsupported on Windows */
+		}
+#else
 		if (name[1] == '/')
 		{
 			index = getuid();
@@ -4913,8 +5033,11 @@ char *name;
 			return(name);
 		}
 		buffer = malloc(strlen(user->pw_dir) + strlen(slash) + 1);
+		if (buffer == NULL)
+			return(name);
 		strcpy(buffer, user->pw_dir);
 		strcat(buffer, slash);
+#endif
 	}
 	else
 		buffer = name;
@@ -5345,4 +5468,3 @@ strings_init()
 	catclose(catalog);
 #endif /* NO_CATGETS */
 }
-

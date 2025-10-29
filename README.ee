@@ -92,11 +92,29 @@ Complaints that ee isn't working quite right often end up being something
 else (like the terminal emulator being used).  
 
 Both ee and new_curse were developed using K&R C (also known as "classic 
-C"), but it can also be compiled with ANSI C.  You should be able to 
-build ee by simply typing "make".  A make file which takes into account 
-the characteristics of your system will be created, and then ee will be 
-built.  If there are problems encountered, you will be notified about 
-them. 
+C"), but it can also be compiled with ANSI C.  A modern CMake-based build 
+is provided and is the recommended way to compile the editor on both Linux 
+and Windows.  The legacy makefiles remain in the tree for historical 
+purposes, but CMake requires far less manual configuration.
+
+Linux (Debian/Ubuntu) quick start:
+
+    sudo apt install build-essential cmake libncurses-dev
+    cmake -S . -B build
+    cmake --build build
+
+Windows (MSYS2 MinGW64 shell) quick start:
+
+    pacman -Syu
+    pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-pdcurses
+    cmake -S . -B build -G "MinGW Makefiles"
+    cmake --build build
+
+On Windows the bundled shell escape still works for `!cmd`, but piping
+editor contents to or from external commands is currently disabled because
+native Windows lacks `fork()` semantics.  When building on POSIX-like
+platforms (including MSYS2's POSIX environment) that functionality
+remains available.
 
 ee is the result of several conflicting design goals.  While I know that it 
 solves the problems of some users, I also have no doubt that some will decry 
@@ -116,4 +134,3 @@ Hugh Mahon              |___|
 hugh4242@yahoo.com      |   |     
                             |\  /|
                             | \/ |
-
