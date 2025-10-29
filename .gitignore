@@ -20,3 +20,4 @@ Makefile
 .vscode/
 .idea/
 *.code-workspace
+_codeql_*
