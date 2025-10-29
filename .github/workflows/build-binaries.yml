@@ -1,0 +1,65 @@
+name: Build Binaries
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    name: Build for Linux (Debian/Ubuntu)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libncurses-dev libcurl4-openssl-dev
+      
+      - name: Configure CMake
+        run: cmake -S . -B build
+      
+      - name: Build
+        run: cmake --build build
+      
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ee-linux-x64
+          path: build/ee
+          retention-days: 90
+
+  build-windows:
+    name: Build for Windows
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-pdcurses
+            mingw-w64-x86_64-curl
+      
+      - name: Configure CMake
+        shell: msys2 {0}
+        run: cmake -S . -B build -G "MinGW Makefiles"
+      
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build build
+      
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ee-windows-x64
+          path: build/ee.exe
+          retention-days: 90
