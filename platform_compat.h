@@ -40,6 +40,10 @@
 #    define unlink _unlink
 #  endif
 
+#  if !defined(strdup)
+#    define strdup _strdup
+#  endif
+
 #else /* !_WIN32 */
 #  include <unistd.h>
 #  include <pwd.h>
@@ -64,4 +68,3 @@ struct passwd_compat {
 #endif
 
 #endif /* EE_PLATFORM_COMPAT_H */
-

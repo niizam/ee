@@ -60,6 +60,7 @@ __FBSDID("$FreeBSD$");
 #endif
 
 #include "platform_compat.h"
+#include <curl/curl.h>
 
 char *ee_copyright_message = 
 "Copyright (c) 1986, 1990, 1991, 1992, 1993, 1994, 1995, 1996, 2009 Hugh Mahon ";
@@ -112,6 +113,48 @@ nl_catd catalog;
 #define CONTROL_KEYS 1
 #define COMMANDS     2
 
+struct openai_config {
+	char *api_key;
+	char *model;
+	char *base_url;
+	char *system_prompt;
+	int enabled;
+};
+
+#define OPENAI_DEFAULT_MODEL "gpt-4o-mini"
+#define OPENAI_DEFAULT_BASE_URL "https://api.openai.com/v1"
+#define OPENAI_DEFAULT_SYSTEM_PROMPT "You are a friendly assistant inside the ee editor."
+#define OPENAI_CHAT_PATH "chat/completions"
+
+static const char OPENAI_CODE_COMPLETION_PROMPT[] =
+"Your role as an AI assistant is to help developers complete their code tasks by assisting in editing specific sections of code marked by the <|code_to_edit|> and <|/code_to_edit|> tags.\n"
+"\n"
+"You have access to the following information to help you make informed suggestions:\n"
+"- current_file_content: The content of the file the developer is currently working on, providing the broader context of the code. Line numbers in the form #| are included to help you understand the edit diff history.\n"
+"- area_around_code_to_edit: The context showing the code surrounding the section to be edited.\n"
+"- cursor position marked as <|cursor|>: Indicates where the developer's cursor is currently located, which can be crucial for understanding what part of the code they are focusing on.\n"
+"\n"
+"Your task is to predict and complete the changes the developer would have made next in the <|code_to_edit|> section. The developer may have stopped in the middle of typing. Your goal is to keep the developer on the path that you think they're following. Some examples include further implementing a class, method, or variable, or improving the quality of the code. Make sure the developer doesn't get distracted and ensure your suggestion is relevant. Consider what changes need to be made next, if any. If you think changes should be made, ask yourself if this is truly what needs to happen. If you are confident about it, then proceed with the changes.\n"
+"\n"
+"# Steps\n"
+"1. **Review Context**: Analyze the context from the resources provided, such as recently viewed snippets, edit history, surrounding code, and cursor location.\n"
+"2. **Evaluate Current Code**: Determine if the current code within the tags requires any corrections or enhancements.\n"
+"3. **Suggest Edits**: If changes are required, ensure they align with the developer's patterns and improve code quality.\n"
+"4. **Maintain Consistency**: Ensure indentation and formatting follow the existing code style.\n"
+"\n"
+"# Output Format\n"
+"- Provide only the revised code within the tags. If no changes are necessary, simply return the original code from within the <|code_to_edit|> and <|/code_to_edit|> tags.\n"
+"- There are line numbers in the form #| in the code displayed to you above, but these are just for your reference. Please do not include the numbers of the form #| in your response.\n"
+"- Ensure that you do not output duplicate code that exists outside of these tags. The output should be the revised code that was between these tags and should not include the <|code_to_edit|> or <|/code_to_edit|> tags.\n"
+"\n"
+"```\n"
+"// Your revised code goes here\n"
+"```\n"
+"\n"
+"# Notes\n"
+"- Avoid undoing or reverting the developer's last change unless there are obvious typos or errors.\n"
+"- Don't include the line numbers of the form #| in your response.\n";
+
 struct text {
 	unsigned char *line;		/* line of characters		*/
 	int line_number;		/* line number			*/
@@ -153,6 +196,28 @@ int last_col;			/* last column for text display		*/
 #if defined(_WIN32)
 static const char win_shell_pipe_msg[] = "shell piping is not supported on Windows builds";
 #endif
+
+struct openai_config openai_cfg = {NULL, NULL, NULL, NULL, FALSE};
+int openai_curl_initialized = FALSE;
+
+char *CHAT_cmd;
+char *COMPLETE_string;
+char *openai_menu_title;
+char *openai_send_prompt;
+char *openai_system_prompt_prompt;
+char *openai_model_prompt;
+char *openai_api_key_prompt;
+char *openai_base_url_prompt;
+char *openai_missing_key_msg;
+char *openai_requesting_msg;
+char *openai_error_fmt;
+char *openai_inserted_msg;
+char *openai_no_response_msg;
+struct text *openai_completion_start_line = NULL;
+struct text *openai_completion_end_line = NULL;
+struct text *openai_completion_after_line = NULL;
+
+
 int horiz_offset = 0;		/* offset from left edge of text	*/
 int clear_com_win;		/* flag to indicate com_win needs clearing */
 int text_changes = FALSE;	/* indicate changes have been made to text */
@@ -334,6 +399,15 @@ char *resolve_name P_((char *name));
 int restrict_mode P_((void));
 int unique_test P_((char *string, char *list[]));
 void strings_init P_((void));
+void openai_runtime_init P_((void));
+void openai_cleanup P_((void));
+void openai_settings_menu P_((void));
+void openai_chat_prompt P_((void));
+void openai_set_api_key P_((void));
+void openai_set_model P_((void));
+void openai_set_system_prompt P_((void));
+void openai_set_base_url P_((void));
+void openai_code_completion_prompt P_((void));
 
 #undef P_
 /*
@@ -400,11 +474,23 @@ struct menu_entries spell_menu[] = {
 	{NULL, NULL, NULL, NULL, NULL, -1}
 	};
 
+struct menu_entries openai_menu[] = {
+	{"", NULL, NULL, NULL, NULL, -1},
+	{"", NULL, NULL, NULL, openai_chat_prompt, -1},
+	{"", NULL, NULL, NULL, openai_code_completion_prompt, -1},
+	{"", NULL, NULL, NULL, openai_set_system_prompt, -1},
+	{"", NULL, NULL, NULL, openai_set_model, -1},
+	{"", NULL, NULL, NULL, openai_set_api_key, -1},
+	{"", NULL, NULL, NULL, openai_set_base_url, -1},
+	{NULL, NULL, NULL, NULL, NULL, -1}
+	};
+
 struct menu_entries misc_menu[] = {
 	{"", NULL, NULL, NULL, NULL, -1}, 
 	{"", NULL, NULL, NULL, Format, -1},
 	{"", NULL, NULL, NULL, shell_op, -1}, 
 	{"", menu_op, spell_menu, NULL, NULL, -1}, 
+	{"", menu_op, openai_menu, NULL, NULL, -1},
 	{NULL, NULL, NULL, NULL, NULL, -1}
 	};
 
@@ -427,7 +513,7 @@ char *emacs_help_text[22];
 char *emacs_control_keys[5];
 
 char *command_strings[5];
-char *commands[32];
+char *commands[34];
 char *init_strings[22];
 
 #define MENU_WARN 1
@@ -505,6 +591,8 @@ char *NOEXPAND;
 char *Exit_string;
 char *QUIT_string;
 char *INFO;
+char *CHAT_cmd;
+char *COMPLETE_string;
 char *NOINFO;
 char *MARGINS;
 char *NOMARGINS;
@@ -578,6 +666,7 @@ char *argv[];
 	gold = case_sen = FALSE;
 	shell_fork = TRUE;
 	strings_init();
+	openai_runtime_init();
 	ee_init();
 	if (argc > 0 )
 		get_options(argc, argv);
@@ -1220,7 +1309,7 @@ control()			/* use control for commands		*/
 	else if (in == 16)	/* control p	*/
 		move_rel('u', max(5, (last_line - 5)));
 	else if (in == 17)	/* control q	*/
-		;
+		openai_settings_menu();
 	else if (in == 18)	/* control r	*/
 		right(TRUE);
 	else if (in == 19)	/* control s	*/
@@ -1239,6 +1328,8 @@ control()			/* use control for commands		*/
 		del_line();
 	else if (in == 26)	/* control z	*/
 		undel_line();
+	else if (in == 29)	/* control ]	*/
+		openai_code_completion_prompt();
 	else if (in == 27)	/* control [ (escape)	*/
 	{
 		menu_op(main_menu);
@@ -1298,7 +1389,7 @@ emacs_control()
 	else if (in == 16)	/* control p	*/
 		up();
 	else if (in == 17)	/* control q	*/
-		;
+		openai_settings_menu();
 	else if (in == 18)	/* control r	*/
 		undel_word();
 	else if (in == 19)	/* control s	*/
@@ -1317,6 +1408,8 @@ emacs_control()
 		search_prompt();
 	else if (in == 26)	/* control z	*/
 		adv_word();
+	else if (in == 29)	/* control ]	*/
+		openai_code_completion_prompt();
 	else if (in == 27)	/* control [ (escape)	*/
 	{
 		menu_op(main_menu);
@@ -1796,6 +1889,10 @@ char *cmd_str1;
 		nc_clearattrib(A_NC_BIG5);
 #endif /* NCURSE */
 	}
+	else if (compare(cmd_str, CHAT_cmd, FALSE))
+		openai_chat_prompt();
+	else if (compare(cmd_str, COMPLETE_string, FALSE))
+		openai_code_completion_prompt();
 	else if (compare(cmd_str, QUIT_string, FALSE))
 		quit(0);
 	else if (*cmd_str == '!')
@@ -3340,6 +3437,1380 @@ char *string;		/* string containing user command		*/
 }
 
 #endif /* _WIN32 */
+
+struct openai_buffer {
+	char *data;
+	size_t length;
+};
+
+static void 
+openai_buffer_init(struct openai_buffer *buffer)
+{
+	buffer->data = malloc(1);
+	if (buffer->data != NULL)
+	{
+		buffer->data[0] = '\0';
+		buffer->length = 0;
+	}
+}
+
+static int 
+openai_buffer_append_len(struct openai_buffer *buffer, const char *text, size_t len)
+{
+	char *tmp;
+
+	tmp = realloc(buffer->data, buffer->length + len + 1);
+	if (tmp == NULL)
+		return(-1);
+	buffer->data = tmp;
+	memcpy(buffer->data + buffer->length, text, len);
+	buffer->length += len;
+	buffer->data[buffer->length] = '\0';
+	return(0);
+}
+
+static int 
+openai_buffer_append(struct openai_buffer *buffer, const char *text)
+{
+	if (text == NULL)
+		return(0);
+	return(openai_buffer_append_len(buffer, text, strlen(text)));
+}
+
+static int 
+openai_buffer_append_fmt(struct openai_buffer *buffer, const char *format, ...)
+{
+	va_list args;
+	char temp[512];
+	int written;
+
+	va_start(args, format);
+	written = vsnprintf(temp, sizeof(temp), format, args);
+	va_end(args);
+	if (written < 0)
+		return(-1);
+	if ((size_t)written >= sizeof(temp))
+	{
+		char *dynamic;
+
+		dynamic = malloc(written + 1);
+		if (dynamic == NULL)
+			return(-1);
+		va_start(args, format);
+		vsnprintf(dynamic, written + 1, format, args);
+		va_end(args);
+		if (openai_buffer_append_len(buffer, dynamic, written) == -1)
+		{
+			free(dynamic);
+			return(-1);
+		}
+		free(dynamic);
+		return(0);
+	}
+	return(openai_buffer_append_len(buffer, temp, written));
+}
+
+static void 
+openai_trim(value)
+char *value;
+{
+	char *start;
+	char *end;
+
+	if (value == NULL)
+		return;
+
+	start = value;
+	while ((*start != '\0') && isspace((unsigned char)*start))
+		start++;
+	if (start != value)
+		memmove(value, start, strlen(start) + 1);
+
+	end = value + strlen(value);
+	while ((end > value) && isspace((unsigned char)end[-1]))
+	{
+		end--;
+		*end = '\0';
+	}
+}
+
+static void 
+openai_replace_string(dest, value)
+char **dest;
+const char *value;
+{
+	if (*dest != NULL)
+	{
+		free(*dest);
+		*dest = NULL;
+	}
+	if ((value != NULL) && (*value != '\0'))
+	{
+		*dest = strdup(value);
+	}
+}
+
+void 
+openai_runtime_init()
+{
+	if (!openai_cfg.enabled)
+	{
+		if (openai_cfg.model == NULL)
+			openai_cfg.model = strdup(OPENAI_DEFAULT_MODEL);
+		if (openai_cfg.base_url == NULL)
+			openai_cfg.base_url = strdup(OPENAI_DEFAULT_BASE_URL);
+		if (openai_cfg.system_prompt == NULL)
+			openai_cfg.system_prompt = strdup(OPENAI_DEFAULT_SYSTEM_PROMPT);
+		openai_cfg.enabled = TRUE;
+	}
+
+	if (!openai_curl_initialized)
+	{
+		if (curl_global_init(CURL_GLOBAL_DEFAULT) == 0)
+		{
+			openai_curl_initialized = TRUE;
+			atexit(openai_cleanup);
+		}
+	}
+}
+
+void 
+openai_cleanup()
+{
+	if (openai_cfg.api_key != NULL)
+	{
+		free(openai_cfg.api_key);
+		openai_cfg.api_key = NULL;
+	}
+	if (openai_cfg.model != NULL)
+	{
+		free(openai_cfg.model);
+		openai_cfg.model = NULL;
+	}
+	if (openai_cfg.base_url != NULL)
+	{
+		free(openai_cfg.base_url);
+		openai_cfg.base_url = NULL;
+	}
+	if (openai_cfg.system_prompt != NULL)
+	{
+		free(openai_cfg.system_prompt);
+		openai_cfg.system_prompt = NULL;
+	}
+	openai_cfg.enabled = FALSE;
+
+	if (openai_curl_initialized)
+	{
+		curl_global_cleanup();
+		openai_curl_initialized = FALSE;
+	}
+}
+
+static char *
+openai_build_url()
+{
+	size_t base_len;
+	size_t path_len;
+	int need_slash;
+	char *url;
+
+	if (openai_cfg.base_url == NULL)
+		return NULL;
+
+	base_len = strlen(openai_cfg.base_url);
+	path_len = strlen(OPENAI_CHAT_PATH);
+	need_slash = (base_len > 0) && (openai_cfg.base_url[base_len - 1] != '/');
+
+	url = malloc(base_len + need_slash + path_len + 1);
+	if (url == NULL)
+		return NULL;
+
+	strcpy(url, openai_cfg.base_url);
+	if (need_slash)
+		strcat(url, "/");
+	strcat(url, OPENAI_CHAT_PATH);
+	return(url);
+}
+
+static char *
+openai_json_escape(input)
+const char *input;
+{
+	size_t length;
+	size_t index;
+	size_t out_length;
+	char *buffer;
+
+	if (input == NULL)
+		input = "";
+
+	length = strlen(input);
+	buffer = malloc((length * 6) + 1);
+	if (buffer == NULL)
+		return(NULL);
+
+	out_length = 0;
+	for (index = 0; index < length; index++)
+	{
+		unsigned char c = (unsigned char)input[index];
+		switch (c)
+		{
+			case '"':
+				buffer[out_length++] = '\\';
+				buffer[out_length++] = '"';
+				break;
+			case '\\':
+				buffer[out_length++] = '\\';
+				buffer[out_length++] = '\\';
+				break;
+			case '\n':
+				buffer[out_length++] = '\\';
+				buffer[out_length++] = 'n';
+				break;
+			case '\r':
+				buffer[out_length++] = '\\';
+				buffer[out_length++] = 'r';
+				break;
+			case '\t':
+				buffer[out_length++] = '\\';
+				buffer[out_length++] = 't';
+				break;
+			default:
+				if (c < 0x20)
+				{
+					sprintf(&buffer[out_length], "\\u%04x", c);
+					out_length += 6;
+				}
+				else
+				{
+					buffer[out_length++] = c;
+				}
+				break;
+		}
+	}
+	buffer[out_length] = '\0';
+	return(buffer);
+}
+
+static int 
+openai_hex_digit(ch)
+int ch;
+{
+	if ((ch >= '0') && (ch <= '9'))
+		return(ch - '0');
+	if ((ch >= 'a') && (ch <= 'f'))
+		return(10 + (ch - 'a'));
+	if ((ch >= 'A') && (ch <= 'F'))
+		return(10 + (ch - 'A'));
+	return(-1);
+}
+
+static char *
+openai_decode_json_string(input)
+const char **input;
+{
+	const char *ptr;
+	char *buffer;
+	size_t capacity;
+	size_t out_len;
+
+	ptr = *input;
+	capacity = 128;
+	buffer = malloc(capacity);
+	if (buffer == NULL)
+		return(NULL);
+	out_len = 0;
+
+	while (*ptr != '\0')
+	{
+		char out_char;
+
+		if (*ptr == '"')
+		{
+			buffer[out_len] = '\0';
+			*input = ptr + 1;
+			return(buffer);
+		}
+
+		if (*ptr == '\\')
+		{
+			ptr++;
+			if (*ptr == '\0')
+				break;
+			switch (*ptr)
+			{
+				case 'n':
+					out_char = '\n';
+					break;
+				case 'r':
+					out_char = '\r';
+					break;
+				case 't':
+					out_char = '\t';
+					break;
+				case '\\':
+					out_char = '\\';
+					break;
+				case '"':
+					out_char = '"';
+					break;
+				case 'u':
+				{
+					unsigned int code;
+					int valid;
+					int counter;
+
+					code = 0;
+					valid = TRUE;
+					for (counter = 0; counter < 4; counter++)
+					{
+						ptr++;
+						if (*ptr == '\0')
+						{
+							valid = FALSE;
+							break;
+						}
+						code <<= 4;
+						if (openai_hex_digit((unsigned char)*ptr) == -1)
+						{
+							valid = FALSE;
+						}
+						else
+							code |= (unsigned int)openai_hex_digit((unsigned char)*ptr);
+					}
+					if (!valid)
+						out_char = '?';
+					else if (code <= 0x7F)
+						out_char = (char)code;
+					else
+						out_char = '?';
+					break;
+				}
+				default:
+					out_char = *ptr;
+					break;
+			}
+		}
+		else
+			out_char = *ptr;
+
+		if ((out_len + 2) > capacity)
+		{
+			char *tmp;
+
+			capacity *= 2;
+			tmp = realloc(buffer, capacity);
+			if (tmp == NULL)
+			{
+				free(buffer);
+				return(NULL);
+			}
+			buffer = tmp;
+		}
+		buffer[out_len++] = out_char;
+		ptr++;
+	}
+
+	free(buffer);
+	return(NULL);
+}
+
+static char *
+openai_extract_message(json)
+const char *json;
+{
+	const char *ptr;
+	const char *scan;
+
+	if (json == NULL)
+		return(NULL);
+
+	ptr = strstr(json, "\"role\":\"assistant\"");
+	if (ptr != NULL)
+		ptr = strstr(ptr, "\"content\"");
+	if (ptr == NULL)
+		ptr = strstr(json, "\"content\"");
+	if (ptr == NULL)
+		return(NULL);
+	ptr = strchr(ptr, ':');
+	if (ptr == NULL)
+		return(NULL);
+	ptr++;
+	while ((*ptr != '\0') && isspace((unsigned char)*ptr))
+		ptr++;
+	if (*ptr == '"')
+	{
+		ptr++;
+		return(openai_decode_json_string(&ptr));
+	}
+	else if (*ptr == '[')
+	{
+		scan = strstr(ptr, "\"text\"");
+		if (scan == NULL)
+			return(NULL);
+		scan = strchr(scan, ':');
+		if (scan == NULL)
+			return(NULL);
+		scan++;
+		while ((*scan != '\0') && isspace((unsigned char)*scan))
+			scan++;
+		if (*scan != '"')
+			return(NULL);
+        scan++;
+		return(openai_decode_json_string(&scan));
+	}
+	return(NULL);
+}
+
+static size_t 
+openai_write_cb(contents, size, nmemb, userp)
+void *contents;
+size_t size;
+size_t nmemb;
+void *userp;
+{
+	size_t total_size;
+	struct openai_buffer *buffer;
+	char *tmp;
+
+	total_size = size * nmemb;
+	buffer = (struct openai_buffer *) userp;
+
+	tmp = realloc(buffer->data, buffer->length + total_size + 1);
+	if (tmp == NULL)
+		return(0);
+	buffer->data = tmp;
+	memcpy(&(buffer->data[buffer->length]), contents, total_size);
+	buffer->length += total_size;
+	buffer->data[buffer->length] = '\0';
+	return(total_size);
+}
+
+static int 
+openai_perform_messages(system_content, user_message, model_override, response_out, error_out)
+const char *system_content;
+const char *user_message;
+const char *model_override;
+char **response_out;
+char **error_out;
+{
+	CURL *curl_handle;
+	struct curl_slist *headers;
+	struct openai_buffer buffer;
+	char *escaped_system;
+	char *escaped_user;
+	char *payload;
+	char *url;
+	char *auth_header;
+	size_t auth_length;
+	CURLcode res;
+	long http_status;
+	char error_buffer[CURL_ERROR_SIZE];
+	int result;
+	const char *model_name;
+	const char *system_text;
+
+	*response_out = NULL;
+	*error_out = NULL;
+
+	model_name = (model_override != NULL) ? model_override : openai_cfg.model;
+	if ((model_name == NULL) || (*model_name == '\0'))
+		model_name = OPENAI_DEFAULT_MODEL;
+	system_text = (system_content != NULL) ? system_content : openai_cfg.system_prompt;
+	if ((system_text == NULL) || (*system_text == '\0'))
+		system_text = OPENAI_DEFAULT_SYSTEM_PROMPT;
+
+	if ((openai_cfg.api_key == NULL) || (*openai_cfg.api_key == '\0'))
+	{
+		const char *missing_msg;
+
+		missing_msg = (openai_missing_key_msg != NULL) ?
+			openai_missing_key_msg :
+			"set an OpenAI API key before requesting a completion";
+		*error_out = strdup(missing_msg);
+		return(-1);
+	}
+
+	curl_handle = curl_easy_init();
+	if (curl_handle == NULL)
+	{
+		*error_out = strdup("unable to initialize network client");
+		return(-1);
+	}
+
+	url = openai_build_url();
+	if (url == NULL)
+	{
+		curl_easy_cleanup(curl_handle);
+		*error_out = strdup("invalid base URL");
+		return(-1);
+	}
+
+	escaped_system = openai_json_escape(system_text);
+	escaped_user = openai_json_escape(user_message);
+	if ((escaped_system == NULL) || (escaped_user == NULL))
+	{
+		if (escaped_system != NULL)
+			free(escaped_system);
+		if (escaped_user != NULL)
+			free(escaped_user);
+		free(url);
+		curl_easy_cleanup(curl_handle);
+		*error_out = strdup("unable to allocate request buffer");
+		return(-1);
+	}
+
+	payload = malloc(strlen(model_name) + strlen(escaped_system) + strlen(escaped_user) + 512);
+	if (payload == NULL)
+	{
+		free(escaped_system);
+		free(escaped_user);
+		free(url);
+		curl_easy_cleanup(curl_handle);
+		*error_out = strdup("unable to allocate request buffer");
+		return(-1);
+	}
+
+	sprintf(payload,
+		"{\"model\":\"%s\",\"messages\":[{\"role\":\"system\",\"content\":\"%s\"},{\"role\":\"user\",\"content\":\"%s\"}]}",
+		model_name,
+		escaped_system,
+		escaped_user);
+
+	buffer.data = NULL;
+	buffer.length = 0;
+	headers = NULL;
+	auth_length = strlen(openai_cfg.api_key) + 32;
+	auth_header = malloc(auth_length);
+	if (auth_header == NULL)
+	{
+		free(payload);
+		free(escaped_system);
+		free(escaped_user);
+		free(url);
+		curl_easy_cleanup(curl_handle);
+		*error_out = strdup("unable to allocate authorization header");
+		return(-1);
+	}
+	snprintf(auth_header, auth_length, "Authorization: Bearer %s", openai_cfg.api_key);
+
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	headers = curl_slist_append(headers, auth_header);
+	free(auth_header);
+
+	curl_easy_setopt(curl_handle, CURLOPT_URL, url);
+	curl_easy_setopt(curl_handle, CURLOPT_POST, 1L);
+	curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload);
+	curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, openai_write_cb);
+	curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&buffer);
+	curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "ee-editor/1.0");
+	curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 120L);
+	curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, error_buffer);
+	error_buffer[0] = '\0';
+
+	res = curl_easy_perform(curl_handle);
+	if (res != CURLE_OK)
+	{
+		const char *err_string;
+
+		if (error_buffer[0] != '\0')
+			err_string = error_buffer;
+		else
+			err_string = curl_easy_strerror(res);
+		*error_out = strdup(err_string);
+		result = -1;
+	}
+	else
+	{
+		curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_status);
+		if ((http_status >= 200) && (http_status < 300))
+		{
+			char *message;
+
+			message = openai_extract_message(buffer.data);
+			if (message != NULL)
+			{
+				*response_out = message;
+				result = 0;
+			}
+			else
+			{
+				const char *no_response;
+
+				no_response = (openai_no_response_msg != NULL) ?
+					openai_no_response_msg :
+					"No response received from OpenAI";
+				*error_out = strdup(no_response);
+				result = -1;
+			}
+		}
+		else
+		{
+			if (buffer.data != NULL)
+			{
+				*error_out = buffer.data;
+				buffer.data = NULL;
+			}
+			else
+				*error_out = strdup("OpenAI returned an empty response");
+			result = -1;
+		}
+	}
+
+	if (buffer.data != NULL)
+		free(buffer.data);
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl_handle);
+	free(payload);
+	free(escaped_system);
+	free(escaped_user);
+	free(url);
+
+	return(result);
+}
+
+static char *
+openai_build_numbered_file()
+{
+	struct openai_buffer buffer;
+	struct text *line_ptr;
+	int line_number;
+
+	openai_buffer_init(&buffer);
+	if (buffer.data == NULL)
+		return(NULL);
+
+	line_ptr = first_line;
+	line_number = 1;
+	while (line_ptr != NULL)
+	{
+		if (openai_buffer_append_fmt(&buffer, "%5d|", line_number) == -1)
+		{
+			free(buffer.data);
+			return(NULL);
+		}
+		if (openai_buffer_append(&buffer, (char *)line_ptr->line) == -1)
+		{
+			free(buffer.data);
+			return(NULL);
+		}
+		if (openai_buffer_append(&buffer, "\n") == -1)
+		{
+			free(buffer.data);
+			return(NULL);
+		}
+		line_ptr = line_ptr->next_line;
+		line_number++;
+	}
+	return(buffer.data);
+}
+
+static void 
+openai_insert_text_at_cursor(text)
+const char *text;
+{
+	const char *ptr;
+
+	if (text == NULL)
+		return;
+
+	for (ptr = text; *ptr != '\0'; ptr++)
+	{
+		if (*ptr == '\r')
+			continue;
+		if (*ptr == '\n')
+			insert_line(TRUE);
+		else
+			insert((unsigned char)*ptr);
+	}
+}
+
+static char *
+openai_build_code_context()
+{
+	struct openai_buffer buffer;
+	struct text *code_lines[5];
+	struct text *before_lines[15];
+	struct text *after_lines[15];
+	int code_count;
+	int before_count;
+	int after_count;
+	int index;
+	struct text *line_ptr;
+	struct text *start_line;
+	char *numbered;
+	const char *path_str;
+	size_t cursor_index;
+	char *current_line_text;
+
+	openai_buffer_init(&buffer);
+	if (buffer.data == NULL)
+		return(NULL);
+
+	path_str = (in_file_name != NULL) ? (char *)in_file_name : "(unsaved buffer)";
+
+	if (openai_buffer_append(&buffer, "<|current_file_content|>\n") == -1)
+		goto fail;
+	if (openai_buffer_append_fmt(&buffer, "current_file_path: %s\n", path_str) == -1)
+		goto fail;
+if (openai_buffer_append(&buffer, "[Codes]<|area_around_code_to_edit|>\n") == -1)
+	goto fail;
+if (openai_buffer_append(&buffer, "```\n") == -1)
+	goto fail;
+
+	code_count = 0;
+	line_ptr = curr_line;
+	while ((line_ptr != NULL) && (code_count < 5))
+	{
+		code_lines[code_count++] = line_ptr;
+		line_ptr = line_ptr->prev_line;
+	}
+	if (code_count == 0)
+	{
+		free(buffer.data);
+		return(NULL);
+	}
+	start_line = code_lines[code_count - 1];
+	openai_completion_start_line = start_line;
+	openai_completion_end_line = code_lines[0];
+	openai_completion_after_line = openai_completion_end_line ? openai_completion_end_line->next_line : NULL;
+
+	before_count = 0;
+	line_ptr = start_line->prev_line;
+	while ((line_ptr != NULL) && (before_count < 15))
+	{
+		before_lines[before_count++] = line_ptr;
+		line_ptr = line_ptr->prev_line;
+	}
+	for (index = before_count - 1; index >= 0; index--)
+	{
+		if (openai_buffer_append(&buffer, (char *)before_lines[index]->line) == -1)
+			goto fail;
+		if (openai_buffer_append(&buffer, "\n") == -1)
+			goto fail;
+	}
+
+if (openai_buffer_append(&buffer, "<|code_to_edit|>\n") == -1)
+	goto fail;
+	for (index = code_count - 1; index >= 0; index--)
+	{
+		line_ptr = code_lines[index];
+		if (line_ptr == curr_line)
+		{
+			current_line_text = (char *)curr_line->line;
+			cursor_index = (size_t)(point - curr_line->line);
+			if (cursor_index > strlen(current_line_text))
+				cursor_index = strlen(current_line_text);
+			if (openai_buffer_append_len(&buffer, current_line_text, cursor_index) == -1)
+				goto fail;
+			if (openai_buffer_append(&buffer, "<|cursor|>") == -1)
+				goto fail;
+			if (openai_buffer_append(&buffer, current_line_text + cursor_index) == -1)
+				goto fail;
+			if (openai_buffer_append(&buffer, "\n") == -1)
+				goto fail;
+		}
+		else
+		{
+			if (openai_buffer_append(&buffer, (char *)line_ptr->line) == -1)
+				goto fail;
+			if (openai_buffer_append(&buffer, "\n") == -1)
+				goto fail;
+		}
+	}
+	if (openai_buffer_append(&buffer, "<|/code_to_edit|>\n") == -1)
+		goto fail;
+
+	after_count = 0;
+	line_ptr = curr_line->next_line;
+	while ((line_ptr != NULL) && (after_count < 15))
+	{
+		after_lines[after_count++] = line_ptr;
+		line_ptr = line_ptr->next_line;
+	}
+	for (index = 0; index < after_count; index++)
+	{
+		if (openai_buffer_append(&buffer, (char *)after_lines[index]->line) == -1)
+			goto fail;
+		if (openai_buffer_append(&buffer, "\n") == -1)
+			goto fail;
+	}
+
+if (openai_buffer_append(&buffer, "```\n") == -1)
+	goto fail;
+
+if (openai_buffer_append_fmt(&buffer, "The developer was working on a section of code within the tags `code_to_edit` in the file located at `%s`. Using the given `current_file_content`, `area_around_code_to_edit`, and the cursor position marked as `<|cursor|>`, please continue the developer's work. Update the `code_to_edit` section by predicting and completing the changes they would have made next. Provide the revised code that was between the `<|code_to_edit|>` and `<|/code_to_edit|>` tags with the following format, but do not include the tags themselves.\n", path_str) == -1)
+	goto fail;
+
+if (openai_buffer_append(&buffer, "```\n// Your revised code goes here\n```\n") == -1)
+	goto fail;
+
+if (openai_buffer_append(&buffer, "<|/area_around_code_to_edit|>[The rest of codes]\n") == -1)
+	goto fail;
+
+	numbered = openai_build_numbered_file();
+	if (numbered == NULL)
+		goto fail;
+	if (openai_buffer_append(&buffer, numbered) == -1)
+	{
+		free(numbered);
+		goto fail;
+	}
+	free(numbered);
+	if (openai_buffer_append(&buffer, "<|/current_file_content|>\n") == -1)
+		goto fail;
+
+	return(buffer.data);
+
+fail:
+	free(buffer.data);
+	return(NULL);
+}
+
+static void 
+openai_strip_triple_backticks(text)
+char *text;
+{
+	char *start;
+	char *after;
+	size_t len;
+
+	if (text == NULL)
+		return;
+
+	start = text;
+	while ((*start != '\0') && isspace((unsigned char)*start))
+		start++;
+	if (start != text)
+		memmove(text, start, strlen(start) + 1);
+
+	if (strncmp(text, "```", 3) == 0)
+	{
+		after = text + 3;
+		while (*after && *after != '\n' && *after != '\r')
+			after++;
+		if (*after == '\r' && after[1] == '\n')
+			after += 2;
+		else if (*after == '\n')
+			after++;
+		memmove(text, after, strlen(after) + 1);
+	}
+
+	len = strlen(text);
+	while (len > 0 && isspace((unsigned char)text[len - 1]))
+		text[--len] = '\0';
+
+	len = strlen(text);
+	if (len >= 3 && text[len - 1] == '`' && text[len - 2] == '`' && text[len - 3] == '`')
+	{
+		len -= 3;
+		text[len] = '\0';
+		while (len > 0 && isspace((unsigned char)text[len - 1]))
+			text[--len] = '\0';
+	}
+}
+
+static int 
+openai_set_line_text(line, content)
+struct text *line;
+const char *content;
+{
+	size_t len;
+	size_t needed;
+	unsigned char *new_buf;
+
+	len = (content != NULL) ? strlen(content) : 0;
+	needed = len + 1;
+	if (line->max_length <= (int)needed)
+	{
+		int new_size = (int)needed + 16;
+		new_buf = realloc(line->line, new_size);
+		if (new_buf == NULL)
+			return(-1);
+		line->line = new_buf;
+		line->max_length = new_size;
+	}
+	if (content != NULL && len > 0)
+		memcpy(line->line, content, len);
+	line->line[len] = '\0';
+	line->line_length = (int)len + 1;
+	return(0);
+}
+
+static void 
+openai_update_line_numbers()
+{
+	struct text *line_ptr;
+	int counter;
+
+	line_ptr = first_line;
+	counter = 1;
+	while (line_ptr != NULL)
+	{
+		line_ptr->line_number = counter++;
+		line_ptr = line_ptr->next_line;
+	}
+}
+
+static void 
+openai_replace_block_with_text(text)
+const char *text;
+{
+	struct text *start;
+	struct text *after;
+	struct text *current;
+	struct text *prev;
+	struct text *last_written;
+	const char *line_start;
+	const char *line_end;
+	int created = FALSE;
+
+	if ((text == NULL) || (*text == '\0'))
+		text = "";
+
+	start = openai_completion_start_line;
+	after = openai_completion_after_line;
+	current = start;
+	prev = (start != NULL) ? start->prev_line : NULL;
+	last_written = NULL;
+	line_start = text;
+
+	while (1)
+	{
+		char *line_copy;
+		size_t len;
+		struct text *target;
+
+		line_end = strchr(line_start, '\n');
+		len = (line_end != NULL) ? (size_t)(line_end - line_start) : strlen(line_start);
+
+		line_copy = malloc(len + 1);
+		if (line_copy == NULL)
+			break;
+		if (len > 0)
+			memcpy(line_copy, line_start, len);
+		line_copy[len] = '\0';
+
+		if ((current != NULL) && (current != after))
+		{
+			target = current;
+			current = current->next_line;
+		}
+		else
+		{
+			target = txtalloc();
+			target->prev_line = prev;
+			target->next_line = after;
+			target->line = malloc(1);
+			if (target->line == NULL)
+			{
+				if (prev != NULL)
+					prev->next_line = after;
+				else
+					first_line = after;
+				if (after != NULL)
+					after->prev_line = prev;
+				free(target);
+				free(line_copy);
+				break;
+			}
+			target->line_length = 1;
+			target->max_length = 1;
+			target->line[0] = '\0';
+			target->line_number = (prev != NULL) ? prev->line_number + 1 : 1;
+			if (prev != NULL)
+				prev->next_line = target;
+			else
+				first_line = target;
+			if (after != NULL)
+				after->prev_line = target;
+			current = target->next_line;
+		}
+
+		if (openai_set_line_text(target, line_copy) == -1)
+		{
+			free(line_copy);
+			break;
+		}
+		free(line_copy);
+		prev = target;
+		last_written = target;
+		created = TRUE;
+
+		if (line_end == NULL)
+			break;
+		line_start = line_end + 1;
+	}
+
+	while ((current != NULL) && (current != after))
+	{
+		struct text *next = current->next_line;
+		if (current->line != NULL)
+			free(current->line);
+		free(current);
+		current = next;
+	}
+
+	if (prev != NULL)
+		prev->next_line = after;
+	else
+		first_line = after;
+	if (after != NULL)
+		after->prev_line = prev;
+
+	if (!created)
+	{
+		/* fallback: ensure at least one blank line exists */
+		struct text *target;
+		target = (after != NULL) ? after : prev;
+		if (target == NULL)
+		{
+			target = txtalloc();
+			target->line = malloc(1);
+			if (target->line == NULL)
+			{
+				free(target);
+				return;
+			}
+			target->line[0] = '\0';
+			target->line_length = 1;
+			target->max_length = 1;
+			target->prev_line = NULL;
+			target->next_line = NULL;
+			target->line_number = 1;
+			first_line = curr_line = target;
+			openai_set_line_text(target, "");
+		}
+	}
+
+	openai_update_line_numbers();
+	text_changes = TRUE;
+
+	if (last_written != NULL)
+	{
+		curr_line = last_written;
+		point = curr_line->line + curr_line->line_length - 1;
+		position = curr_line->line_length;
+		scanline(point);
+	}
+	else if (after != NULL)
+	{
+		curr_line = after;
+		point = curr_line->line;
+		position = 1;
+		scanline(point);
+	}
+	else if (prev != NULL)
+	{
+		curr_line = prev;
+		point = curr_line->line + curr_line->line_length - 1;
+		position = curr_line->line_length;
+		scanline(point);
+	}
+
+	if (openai_completion_end_line != NULL)
+		openai_completion_end_line = last_written;
+	openai_completion_start_line = NULL;
+	openai_completion_after_line = NULL;
+}
+
+static void 
+openai_insert_response(text)
+const char *text;
+{
+	const char *ptr;
+	int added_text;
+
+	if ((text == NULL) || (*text == '\0'))
+		return;
+
+	added_text = FALSE;
+	if ((curr_line->line_length > 1) || (scr_pos > 0))
+		insert_line(TRUE);
+
+	for (ptr = text; *ptr != '\0'; ptr++)
+	{
+		if (*ptr == '\r')
+			continue;
+		if (*ptr == '\n')
+			insert_line(TRUE);
+		else
+			insert((unsigned char)*ptr);
+		added_text = TRUE;
+	}
+
+	if (added_text && (*(ptr - 1) != '\n'))
+		insert_line(TRUE);
+}
+
+static void 
+openai_perform_and_insert(message)
+const char *message;
+{
+	char *response;
+	char *error_text;
+	int status;
+	const char *request_msg;
+	const char *insert_msg;
+	const char *error_fmt;
+
+	response = NULL;
+	error_text = NULL;
+	request_msg = (openai_requesting_msg != NULL) ? openai_requesting_msg : "contacting OpenAI ...";
+	insert_msg = (openai_inserted_msg != NULL) ? openai_inserted_msg : "OpenAI response inserted";
+	error_fmt = (openai_error_fmt != NULL) ? openai_error_fmt : "OpenAI error: %s";
+
+	wmove(com_win, 0, 0);
+	wclrtoeol(com_win);
+	wprintw(com_win, "%s", request_msg);
+	wrefresh(com_win);
+
+	status = openai_perform_messages(NULL, message, NULL, &response, &error_text);
+	if ((status == 0) && (response != NULL))
+	{
+		openai_strip_triple_backticks(response);
+		openai_insert_response(response);
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, "%s", insert_msg);
+		wrefresh(com_win);
+		free(response);
+	}
+	else
+	{
+		const char *error_display;
+
+		if (error_text != NULL)
+			error_display = error_text;
+		else if (openai_no_response_msg != NULL)
+			error_display = openai_no_response_msg;
+		else
+			error_display = "no response received from OpenAI";
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, error_fmt, error_display);
+		wrefresh(com_win);
+		if (error_text != NULL)
+			free(error_text);
+		if (response != NULL)
+			free(response);
+	}
+}
+
+void 
+openai_chat_prompt()
+{
+	char *message;
+	const char *prompt;
+	const char *missing_msg;
+
+	openai_runtime_init();
+	openai_completion_start_line = NULL;
+	openai_completion_end_line = NULL;
+	openai_completion_after_line = NULL;
+
+	if ((openai_cfg.api_key == NULL) || (*openai_cfg.api_key == '\0'))
+	{
+		missing_msg = (openai_missing_key_msg != NULL) ?
+			openai_missing_key_msg :
+			"set an OpenAI API key before requesting a completion";
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, "%s", missing_msg);
+		wrefresh(com_win);
+		return;
+	}
+
+	prompt = (openai_send_prompt != NULL) ? openai_send_prompt : "openai message: ";
+	message = get_string((char *)prompt, TRUE);
+	if (message == NULL)
+		return;
+	openai_trim(message);
+	if (*message == '\0')
+	{
+		free(message);
+		return;
+	}
+
+	openai_perform_and_insert(message);
+	free(message);
+}
+
+void 
+openai_set_api_key()
+{
+	char *value;
+	const char *prompt;
+
+	openai_runtime_init();
+	prompt = (openai_api_key_prompt != NULL) ? openai_api_key_prompt : "api key (blank to clear): ";
+	value = get_string((char *)prompt, TRUE);
+	if (value == NULL)
+		return;
+	openai_trim(value);
+	if (*value == '\0')
+		openai_replace_string(&openai_cfg.api_key, NULL);
+	else
+		openai_replace_string(&openai_cfg.api_key, value);
+	free(value);
+}
+
+void 
+openai_set_model()
+{
+	char *value;
+	const char *prompt;
+
+	openai_runtime_init();
+	prompt = (openai_model_prompt != NULL) ? openai_model_prompt : "model name: ";
+	value = get_string((char *)prompt, TRUE);
+	if (value == NULL)
+		return;
+	openai_trim(value);
+	if (*value == '\0')
+		openai_replace_string(&openai_cfg.model, OPENAI_DEFAULT_MODEL);
+	else
+		openai_replace_string(&openai_cfg.model, value);
+	free(value);
+}
+
+void 
+openai_set_system_prompt()
+{
+	char *value;
+	const char *prompt;
+
+	openai_runtime_init();
+	prompt = (openai_system_prompt_prompt != NULL) ? openai_system_prompt_prompt : "system prompt: ";
+	value = get_string((char *)prompt, TRUE);
+	if (value == NULL)
+		return;
+	openai_trim(value);
+	if (*value == '\0')
+		openai_replace_string(&openai_cfg.system_prompt, OPENAI_DEFAULT_SYSTEM_PROMPT);
+	else
+		openai_replace_string(&openai_cfg.system_prompt, value);
+	free(value);
+}
+
+void 
+openai_set_base_url()
+{
+	char *value;
+	const char *prompt;
+
+	openai_runtime_init();
+	prompt = (openai_base_url_prompt != NULL) ? openai_base_url_prompt : "base url: ";
+	value = get_string((char *)prompt, TRUE);
+	if (value == NULL)
+		return;
+	openai_trim(value);
+	if (*value == '\0')
+		openai_replace_string(&openai_cfg.base_url, OPENAI_DEFAULT_BASE_URL);
+	else
+		openai_replace_string(&openai_cfg.base_url, value);
+	free(value);
+}
+
+void 
+openai_code_completion_prompt()
+{
+	const char *system_prompt;
+	char *user_prompt;
+	char *response;
+	char *error_text;
+	const char *request_msg;
+	const char *insert_msg;
+	const char *error_fmt;
+	const char *missing_msg;
+	int status;
+
+	openai_runtime_init();
+
+	if ((openai_cfg.api_key == NULL) || (*openai_cfg.api_key == '\0'))
+	{
+		missing_msg = (openai_missing_key_msg != NULL) ?
+			openai_missing_key_msg :
+			"Set an OpenAI API key before requesting a completion";
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, "%s", missing_msg);
+		wrefresh(com_win);
+		return;
+	}
+
+	user_prompt = openai_build_code_context();
+	if (user_prompt == NULL)
+	{
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, "unable to prepare code completion context");
+		wrefresh(com_win);
+		return;
+	}
+
+	system_prompt = OPENAI_CODE_COMPLETION_PROMPT;
+
+	request_msg = (openai_requesting_msg != NULL) ?
+		openai_requesting_msg : "Contacting OpenAI ...";
+	insert_msg = (openai_inserted_msg != NULL) ?
+		openai_inserted_msg : "OpenAI response inserted";
+	error_fmt = (openai_error_fmt != NULL) ?
+		openai_error_fmt : "OpenAI error: %s";
+
+	wmove(com_win, 0, 0);
+	wclrtoeol(com_win);
+	wprintw(com_win, "%s", request_msg);
+	wrefresh(com_win);
+
+	response = NULL;
+	error_text = NULL;
+	status = openai_perform_messages(system_prompt, user_prompt, NULL, &response, &error_text);
+	if ((status == 0) && (response != NULL))
+	{
+		openai_strip_triple_backticks(response);
+		if (openai_completion_start_line != NULL)
+			openai_replace_block_with_text(response);
+		else
+			openai_insert_text_at_cursor(response);
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, "%s", insert_msg);
+		wrefresh(com_win);
+		free(response);
+		response = NULL;
+		redraw();
+	}
+	else
+	{
+		const char *err_display;
+
+		err_display = (error_text != NULL) ? error_text :
+			"No response received from OpenAI";
+		wmove(com_win, 0, 0);
+		wclrtoeol(com_win);
+		wprintw(com_win, error_fmt, err_display);
+		wrefresh(com_win);
+	}
+
+	if (error_text != NULL)
+		free(error_text);
+	if (response != NULL)
+		free(response);
+	free(user_prompt);
+	openai_completion_start_line = NULL;
+	openai_completion_end_line = NULL;
+	openai_completion_after_line = NULL;
+	clear_com_win = TRUE;
+}
+
+void 
+openai_settings_menu()
+{
+	openai_runtime_init();
+	menu_op(openai_menu);
+}
 
 void 
 set_up_term()		/* set up the terminal for operating with ae	*/
@@ -5229,10 +6700,31 @@ strings_init()
 	spell_menu[0].item_string = catgetlocal( 20, "spell menu");
 	spell_menu[1].item_string = catgetlocal( 21, "use 'spell'");
 	spell_menu[2].item_string = catgetlocal( 22, "use 'ispell'");
+	openai_menu_title = catgetlocal( 186, "OpenAI assistant");
+	openai_menu[0].item_string = openai_menu_title;
+	openai_menu[1].item_string = catgetlocal( 187, "Ask OpenAI (insert response)");
+	openai_menu[2].item_string = catgetlocal( 205, "Code completion (insert response)");
+	openai_menu[3].item_string = catgetlocal( 188, "Set system prompt");
+	openai_menu[4].item_string = catgetlocal( 189, "Set model");
+	openai_menu[5].item_string = catgetlocal( 190, "Set API key");
+	openai_menu[6].item_string = catgetlocal( 191, "Set base URL");
 	misc_menu[0].item_string = catgetlocal( 23, "miscellaneous menu");
 	misc_menu[1].item_string = catgetlocal( 24, "format paragraph");
 	misc_menu[2].item_string = catgetlocal( 25, "shell command");
 	misc_menu[3].item_string = catgetlocal( 26, "check spelling");
+	misc_menu[4].item_string = catgetlocal( 203, "OpenAI assistant");
+	openai_send_prompt = catgetlocal( 192, "OpenAI message: ");
+	openai_system_prompt_prompt = catgetlocal( 193, "System prompt (blank for default): ");
+	openai_model_prompt = catgetlocal( 194, "Model name (blank for default): ");
+	openai_api_key_prompt = catgetlocal( 195, "API key (blank to clear): ");
+	openai_base_url_prompt = catgetlocal( 196, "Base URL (blank for default): ");
+	openai_missing_key_msg = catgetlocal( 197, "Set an OpenAI API key before requesting a completion");
+	openai_requesting_msg = catgetlocal( 198, "Contacting OpenAI ...");
+	openai_error_fmt = catgetlocal( 199, "OpenAI error: %s");
+	openai_inserted_msg = catgetlocal( 200, "OpenAI response inserted into buffer");
+	openai_no_response_msg = catgetlocal( 202, "No response received from OpenAI");
+	CHAT_cmd = catgetlocal( 201, "CHAT");
+	COMPLETE_string = catgetlocal( 204, "COMPLETE");
 	main_menu[0].item_string  = catgetlocal( 27, "main menu");
 	main_menu[1].item_string  = catgetlocal( 28, "leave editor");
 	main_menu[2].item_string  = catgetlocal( 29, "help");
@@ -5250,29 +6742,29 @@ strings_init()
 	help_text[6] = catgetlocal( 41, "^f undelete char        ^n next page            ^x search                  ");
 	help_text[7] = catgetlocal( 42, "^g begin of line        ^o end of line          ^y delete line             ");
 	help_text[8] = catgetlocal( 43, "^h backspace            ^p prev page            ^z undelete line           ");
-	help_text[9] = catgetlocal( 44, "^[ (escape) menu        ESC-Enter: exit ee                                 ");
+	help_text[9] = catgetlocal( 44, "^[ (escape) menu  ^q openai menu   ESC-Enter: exit ee                      ");
 	help_text[10] = catgetlocal( 45, "                                                                           ");
 	help_text[11] = catgetlocal( 46, "Commands:                                                                  ");
 	help_text[12] = catgetlocal( 47, "help    : get this info                 file    : print file name          ");
 	help_text[13] = catgetlocal( 48, "read    : read a file                   char    : ascii code of char       ");
 	help_text[14] = catgetlocal( 49, "write   : write a file                  case    : case sensitive search    ");
 	help_text[15] = catgetlocal( 50, "exit    : leave and save                nocase  : case insensitive search  ");
-	help_text[16] = catgetlocal( 51, "quit    : leave, no save                !cmd    : execute \"cmd\" in shell   ");
+	help_text[16] = catgetlocal( 51, "quit    : leave, no save                !cmd    : run a shell command       ");
 	help_text[17] = catgetlocal( 52, "line    : display line #                0-9     : go to line \"#\"           ");
 	help_text[18] = catgetlocal( 53, "expand  : expand tabs                   noexpand: do not expand tabs         ");
-	help_text[19] = catgetlocal( 54, "                                                                             ");
+	help_text[19] = catgetlocal( 54, "chat    : ask OpenAI assistant       complete: OpenAI code completion    ");
 	help_text[20] = catgetlocal( 55, "  ee [+#] [-i] [-e] [-h] [file(s)]                                            ");
 	help_text[21] = catgetlocal( 56, "+# :go to line #  -i :no info window  -e : don't expand tabs  -h :no highlight");
 	control_keys[0] = catgetlocal( 57, "^[ (escape) menu  ^e search prompt  ^y delete line    ^u up     ^p prev page  ");
 	control_keys[1] = catgetlocal( 58, "^a ascii code     ^x search         ^z undelete line  ^d down   ^n next page  ");
 	control_keys[2] = catgetlocal( 59, "^b bottom of text ^g begin of line  ^w delete word    ^l left                 ");
 	control_keys[3] = catgetlocal( 60, "^t top of text    ^o end of line    ^v undelete word  ^r right                ");
-	control_keys[4] = catgetlocal( 61, "^c command        ^k delete char    ^f undelete char      ESC-Enter: exit ee  ");
+	control_keys[4] = catgetlocal( 61, "^c command        ^k delete char    ^f undelete char  ^] code complete  ESC-Enter: exit ee");
 	command_strings[0] = catgetlocal( 62, "help : get help info  |file  : print file name         |line : print line # ");
 	command_strings[1] = catgetlocal( 63, "read : read a file    |char  : ascii code of char      |0-9 : go to line \"#\"");
 	command_strings[2] = catgetlocal( 64, "write: write a file   |case  : case sensitive search   |exit : leave and save ");
-	command_strings[3] = catgetlocal( 65, "!cmd : shell \"cmd\"    |nocase: ignore case in search   |quit : leave, no save");
-	command_strings[4] = catgetlocal( 66, "expand: expand tabs   |noexpand: do not expand tabs                           ");
+	command_strings[3] = catgetlocal( 65, "!cmd : shell command  |nocase: ignore case in search   |quit : leave, no save");
+	command_strings[4] = catgetlocal( 66, "expand: expand tabs   |noexpand: do not expand tabs   |chat : ask OpenAI |complete: code completion");
 	com_win_message = catgetlocal( 67, "    press Escape (^[) for menu");
 	no_file_string = catgetlocal( 68, "no file");
 	ascii_code_str = catgetlocal( 69, "ascii code: ");
@@ -5381,7 +6873,7 @@ strings_init()
 	emacs_control_keys[1] = catgetlocal( 155, "^o ascii code    ^x search        ^l undelete line ^n next li     ^v next page");
 	emacs_control_keys[2] = catgetlocal( 156, "^u end of file   ^a begin of line ^w delete word   ^b back 1 char ^z next word");
 	emacs_control_keys[3] = catgetlocal( 157, "^t top of text   ^e end of line   ^r restore word  ^f forward char            ");
-	emacs_control_keys[4] = catgetlocal( 158, "^c command       ^d delete char   ^j undelete char              ESC-Enter: exit");
+	emacs_control_keys[4] = catgetlocal( 158, "^c command       ^d delete char   ^j undelete char   ^] code complete  ESC-Enter: exit");
 	EMACS_string = catgetlocal( 159, "EMACS");
 	NOEMACS_string = catgetlocal( 160, "NOEMACS");
 	usage4 = catgetlocal( 161, "       +#   put cursor at line #\n");
@@ -5431,7 +6923,9 @@ strings_init()
 	commands[28] = CHARACTER;
 	commands[29] = chinese_cmd;
 	commands[30] = nochinese_cmd;
-	commands[31] = NULL;
+	commands[31] = CHAT_cmd;
+	commands[32] = COMPLETE_string;
+	commands[33] = NULL;
 	init_strings[0] = CASE;
 	init_strings[1] = NOCASE;
 	init_strings[2] = EXPAND;

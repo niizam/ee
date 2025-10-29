@@ -99,16 +99,23 @@ purposes, but CMake requires far less manual configuration.
 
 Linux (Debian/Ubuntu) quick start:
 
-    sudo apt install build-essential cmake libncurses-dev
+    sudo apt install build-essential cmake libncurses-dev libcurl4-openssl-dev
     cmake -S . -B build
     cmake --build build
 
 Windows (MSYS2 MinGW64 shell) quick start:
 
     pacman -Syu
-    pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-pdcurses
+    pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-pdcurses mingw-w64-x86_64-curl
     cmake -S . -B build -G "MinGW Makefiles"
     cmake --build build
+
+OpenAI chat completions and code completions are available from inside the
+editor. Press `Ctrl+q` to open the assistant menu, where you can set the API
+key, base URL, model name, and system prompt, or trigger the assistant
+actions. Use the `chat` command (or pick “Ask OpenAI”) for conversational
+help, and use the `complete` command or the `Ctrl+]` shortcut to request an
+inline code completion tailored to the current cursor position.
 
 On Windows the bundled shell escape still works for `!cmd`, but piping
 editor contents to or from external commands is currently disabled because
