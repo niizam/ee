@@ -1,0 +1,1 @@
+/usr/bin/cc -Wl,--dependency-file=CMakeFiles/ee.dir/link.d CMakeFiles/ee.dir/ee.c.o -o ee  -lcurses /usr/lib/x86_64-linux-gnu/libform.so /usr/lib/x86_64-linux-gnu/libcurl.so
