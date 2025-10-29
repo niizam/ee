@@ -18,6 +18,20 @@ actions. Use the `chat` command (or pick “Ask OpenAI”) for conversational
 help, and use the `complete` command or the `Ctrl+]` shortcut to request an
 inline code completion tailored to the current cursor position.
 
+You can also preconfigure the assistant via environment variables before
+launching `ee`:
+
+```bash
+export EE_OPENAI_API_KEY="sk-..."
+export EE_OPENAI_BASE_URL="https://api.openai.com/v1"
+export EE_OPENAI_MODEL="gpt-4o-mini"
+export EE_OPENAI_SYSTEM_PROMPT="You are a friendly assistant inside the ee editor."
+```
+
+Values provided through the UI override the environment for the current
+session, and clearing a field in the menu falls back to the environment (if
+set) or to the built-in defaults shown above.
+
 On Windows the bundled shell escape still works for `!cmd`, but piping
 editor contents to or from external commands is currently disabled because
 native Windows lacks `fork()` semantics.  When building on POSIX-like

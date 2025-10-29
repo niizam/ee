@@ -78,6 +78,7 @@ char *version = "@(#) ee, version "  EE_VERSION  " $Revision: 1.104 $";
 #endif
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -131,6 +132,24 @@ struct openai_config {
 #define OPENAI_DEFAULT_BASE_URL "https://api.openai.com/v1"
 #define OPENAI_DEFAULT_SYSTEM_PROMPT "You are a friendly assistant inside the ee editor."
 #define OPENAI_CHAT_PATH "chat/completions"
+
+#define EE_OPENAI_API_KEY_ENV "EE_OPENAI_API_KEY"
+#define EE_OPENAI_MODEL_ENV "EE_OPENAI_MODEL"
+#define EE_OPENAI_BASE_URL_ENV "EE_OPENAI_BASE_URL"
+#define EE_OPENAI_SYSTEM_PROMPT_ENV "EE_OPENAI_SYSTEM_PROMPT"
+
+static const char *
+openai_env_or_default(env_name, default_value)
+const char *env_name;
+const char *default_value;
+{
+	const char *value;
+
+	value = getenv(env_name);
+	if ((value == NULL) || (*value == '\0'))
+		return(default_value);
+	return(value);
+}
 
 static const char OPENAI_CODE_COMPLETION_PROMPT[] =
 "Your role as an AI assistant is to help developers complete their code tasks by assisting in editing specific sections of code marked by the <|code_to_edit|> and <|/code_to_edit|> tags.\n"
@@ -3565,14 +3584,23 @@ const char *value;
 void 
 openai_runtime_init()
 {
+	if ((openai_cfg.api_key == NULL) || (*openai_cfg.api_key == '\0'))
+	{
+		const char *env_key;
+
+		env_key = openai_env_or_default(EE_OPENAI_API_KEY_ENV, NULL);
+		if (env_key != NULL)
+			openai_replace_string(&openai_cfg.api_key, env_key);
+	}
+
 	if (!openai_cfg.enabled)
 	{
 		if (openai_cfg.model == NULL)
-			openai_cfg.model = strdup(OPENAI_DEFAULT_MODEL);
+			openai_cfg.model = strdup(openai_env_or_default(EE_OPENAI_MODEL_ENV, OPENAI_DEFAULT_MODEL));
 		if (openai_cfg.base_url == NULL)
-			openai_cfg.base_url = strdup(OPENAI_DEFAULT_BASE_URL);
+			openai_cfg.base_url = strdup(openai_env_or_default(EE_OPENAI_BASE_URL_ENV, OPENAI_DEFAULT_BASE_URL));
 		if (openai_cfg.system_prompt == NULL)
-			openai_cfg.system_prompt = strdup(OPENAI_DEFAULT_SYSTEM_PROMPT);
+			openai_cfg.system_prompt = strdup(openai_env_or_default(EE_OPENAI_SYSTEM_PROMPT_ENV, OPENAI_DEFAULT_SYSTEM_PROMPT));
 		openai_cfg.enabled = TRUE;
 	}
 
@@ -3927,10 +3955,19 @@ char **error_out;
 
 	model_name = (model_override != NULL) ? model_override : openai_cfg.model;
 	if ((model_name == NULL) || (*model_name == '\0'))
-		model_name = OPENAI_DEFAULT_MODEL;
+		model_name = openai_env_or_default(EE_OPENAI_MODEL_ENV, OPENAI_DEFAULT_MODEL);
 	system_text = (system_content != NULL) ? system_content : openai_cfg.system_prompt;
 	if ((system_text == NULL) || (*system_text == '\0'))
-		system_text = OPENAI_DEFAULT_SYSTEM_PROMPT;
+		system_text = openai_env_or_default(EE_OPENAI_SYSTEM_PROMPT_ENV, OPENAI_DEFAULT_SYSTEM_PROMPT);
+
+	if ((openai_cfg.api_key == NULL) || (*openai_cfg.api_key == '\0'))
+	{
+		const char *env_key;
+
+		env_key = openai_env_or_default(EE_OPENAI_API_KEY_ENV, NULL);
+		if (env_key != NULL)
+			openai_replace_string(&openai_cfg.api_key, env_key);
+	}
 
 	if ((openai_cfg.api_key == NULL) || (*openai_cfg.api_key == '\0'))
 	{
@@ -4681,7 +4718,7 @@ openai_set_model()
 		return;
 	openai_trim(value);
 	if (*value == '\0')
-		openai_replace_string(&openai_cfg.model, OPENAI_DEFAULT_MODEL);
+		openai_replace_string(&openai_cfg.model, openai_env_or_default(EE_OPENAI_MODEL_ENV, OPENAI_DEFAULT_MODEL));
 	else
 		openai_replace_string(&openai_cfg.model, value);
 	free(value);
@@ -4700,7 +4737,7 @@ openai_set_system_prompt()
 		return;
 	openai_trim(value);
 	if (*value == '\0')
-		openai_replace_string(&openai_cfg.system_prompt, OPENAI_DEFAULT_SYSTEM_PROMPT);
+		openai_replace_string(&openai_cfg.system_prompt, openai_env_or_default(EE_OPENAI_SYSTEM_PROMPT_ENV, OPENAI_DEFAULT_SYSTEM_PROMPT));
 	else
 		openai_replace_string(&openai_cfg.system_prompt, value);
 	free(value);
@@ -4719,7 +4756,7 @@ openai_set_base_url()
 		return;
 	openai_trim(value);
 	if (*value == '\0')
-		openai_replace_string(&openai_cfg.base_url, OPENAI_DEFAULT_BASE_URL);
+		openai_replace_string(&openai_cfg.base_url, openai_env_or_default(EE_OPENAI_BASE_URL_ENV, OPENAI_DEFAULT_BASE_URL));
 	else
 		openai_replace_string(&openai_cfg.base_url, value);
 	free(value);
