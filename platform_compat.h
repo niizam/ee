@@ -18,6 +18,9 @@
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
 #  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
 #  include <windows.h>
 #  include <io.h>
 #  include <direct.h>
@@ -44,10 +47,24 @@
 #    define strdup _strdup
 #  endif
 
+/* Provide portable wrapper for POSIX link() function on Windows */
+static inline int ee_link(const char *oldpath, const char *newpath)
+{
+	if (CreateHardLinkA(newpath, oldpath, NULL)) {
+		return 0;
+	}
+	errno = EACCES; /* Approximate errno value */
+	return -1;
+}
+
 #else /* !_WIN32 */
 #  include <unistd.h>
 #  include <pwd.h>
 #  include <sys/wait.h>
+
+/* On POSIX systems, use native link() */
+#  define ee_link link
+
 #endif
 
 /* Some systems (notably Windows) lack catgets; guard it here. */
